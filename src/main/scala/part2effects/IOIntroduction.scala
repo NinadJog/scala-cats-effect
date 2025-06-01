@@ -43,6 +43,9 @@ object IOIntroduction {
     54
   }
 
+  // 4. With IO.defer. Appears later in this file. IO.defer is a combination
+  // of IO.delay and flatten.
+
   //---------------------------------------------------------------------------
   // map, flatMap, etc.
   val improvedMeaningOfLife: IO[Int] = ourFirstIO map (_*2)
@@ -81,14 +84,14 @@ object IOIntroduction {
   // Using flatMap and map. My attempt
   def sequenceTakeLast_v2[A, B](ioa: IO[A], iob: IO[B]): IO[B] =
     ioa flatMap (_ =>   // The use of flatMap guarantees sequencing of a followed by b
-    iob map     (identity(_)))   // (b => b)
+    iob map     identity)   // (b => b)
 
-  // But this reduces to the following, because iob map (identity(_))
+  // But this reduces to the following, because iob map identity
   // is the same as iob.
   def sequenceTakeLast_v3[A, B](ioa: IO[A], iob: IO[B]): IO[B] =
     ioa flatMap (_ => iob)
 
-  // This pattern is so common that it has an operator *> called andThen:
+  // This pattern is so common that it has an operator *> called eager andThen:
   def sequenceTakeLast_v4[A, B](ioa: IO[A], iob: IO[B]): IO[B] =
     ioa *> iob  // "andThen"
 
