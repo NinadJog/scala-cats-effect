@@ -1,10 +1,20 @@
 package part3concurrency
 
-import cats.effect.{IO, IOApp}
+/**
+ * Key takeaways
+ *
+ * 1. Bracket pattern for managing resource lifecycle
+ * 2. Nesting brackets is clunky, so use Resource
+ * 3. Resource decouples acquisition and release from use
+ * 4. Nested resources are straightforward to specify as they can be composed
+ * 5. IO (which means any effect) can have finalizers
+ */
+
+import cats.effect.{IO, IOApp, Resource}
 import java.io.{File, FileReader}
 import java.util.Scanner
 import scala.concurrent.duration.*
-import utils._
+import utils.*
 
 object Resources extends IOApp.Simple {
 
@@ -129,12 +139,253 @@ object Resources extends IOApp.Simple {
       readLineByLine(scanner)
     else IO.unit
 
-  //---------------------------------------------------------------------------
   /**
-   * In the case of the exercise problem, there's no need for us to spawn a
+   * In this case, there's no need to spawn a
    * fiber explicitly because bracket takes care of asynchrony and of fiber
    * scheduling automatically.
-  */
+  *
   override def run: IO[Unit] = bracketReadFile(
     "src/main/scala/part3concurrency/Resources.scala").void
+  */
+
+  //---------------------------------------------------------------------------
+  // Nested Brackets
+
+  /**
+   * Use case: Two resources. Open a file, read configuration information
+   * from it and use it to open a URL connection.
+   *
+   * If we use the bracket pattern to implement this, it leads to nested
+   * brackets as shown in the following code because there are two resources.
+   * The code is no longer easily readable, as it becomes similar to nested
+   * try-catches.
+   */
+  def connFromConfig(path: String): IO[Unit] =
+    openFileScanner(path)
+      .bracket { scanner =>
+        // acquire a connection based on the contents of the file.
+        IO(new Connection(scanner.nextLine()))  // 1. resource acquisition
+          .bracket { conn =>
+            conn.open().myDebug >>              // 2. resource usage
+            IO.never  // sleep forever and make an IO effect that never terminates
+          } { conn =>
+            IO("closing connection").myDebug >>
+            conn.close().void                   // 3. resource release
+          }
+      } { scanner =>
+        IO("closing file").myDebug >>
+        IO(scanner.close())
+      }
+
+  //---------------------------------------------------------------------------
+  // Resources
+  //
+  // It's tedious to nest resources with the bracket pattern.
+  // A better option is to use Resource.
+
+  /**
+   * The gist of a Resource is that we can first construct it along with its
+   * finalizer and use it later in our code.
+   *
+   * While the bracket had all 3 components of a resource: resource acquisition,
+   * resource usage, and resource release, the Resource has only two:
+   * acquisition and release. The resource usage can happen later. We decouple
+   * the logic of using the resource from the logic of acquiring and releasing
+   * it. The code becomes modular and it's also easy to compose multiple
+   * resources. Resource is one of the most powerful features of Cats-Effect.
+   */
+
+  val connectionResource: Resource[IO, Connection] =
+    Resource.make {
+      IO(new Connection("rockthejvm.com")) // acquire the resource
+    } { conn =>
+      conn.close().void                    // release it
+    }
+
+  // ... at a later point in the code, use the resource as follows.
+  // This code is highly readable
+  val resourceFetchUrl: IO[Unit] = for {
+    fib <- connectionResource.use(conn => conn.open() >> IO.never).start
+    _   <- IO.sleep(1.second) >> fib.cancel
+  } yield ()
+
+  // We can use this code without having to care how the resource is handled
+  // behind the scenes if the computation succeeds, fails, or is canceled.
+
+  /* Test it:
+    override def run: IO[Unit] = resourceFetchUrl.void
+
+    Output:
+    [io-compute-2] opening connection to rockthejvm.com
+    [io-compute-1] closing connection to rockthejvm.com
+   */
+
+  //---------------------------------------------------------------------------
+  // Resources are equivalent to brackets
+
+  // Example: create a resource, a usage callback and a finalizing callback:
+  val simpleResource = IO("some resource")
+  val usingResource: String => IO[String] = string => IO(s"using resource $string").myDebug
+  val releaseResource: String => IO[Unit] = string => IO(s"releasing resource $string").void
+
+  // Use this resource and its callbacks with the bracket and with the Resource
+  // data structure.
+  // With bracket:
+  val tryBracket: IO[String] = simpleResource.bracket(usingResource)(releaseResource)
+
+  // With Resource:
+  val tryResource: Resource[IO, String] = Resource.make(simpleResource)(releaseResource)
+  // later in the code we can call
+  val useResource: IO[String] = tryResource.use(usingResource)
+
+  //---------------------------------------------------------------------------
+  /**
+   * Exercise: Read a text file with one line every 100 millis, using Resource
+   * (Refactor the bracket exercise to use Resource.)
+   */
+
+  // Acquire the file resource and set up its finalizer
+  def makeResourceFromFile(path: String): Resource[IO, Scanner] =
+    Resource.make {
+      IO(s"opening file at $path").myDebug >>
+      openFileScanner(path)
+    } { scanner =>
+      IO(s"closing file at $path").myDebug >>
+      IO(scanner.close())
+    }
+
+  // Use the file resource to read the file
+  def resourceReadFile(path: String): IO[Unit] =
+    makeResourceFromFile(path) use readLineByLine
+    // same as makeResourceFromFile(path).use(scanner => readLineByLine(scanner))
+
+  val readTextFile: IO[Unit] = resourceReadFile("src/main/scala/part3concurrency/Resources.scala")
+
+  // Example of how to cancel the read
+  def cancelReadFile(path: String): IO[Unit] = for {
+    fib <-  resourceReadFile(path).start  // Start a fiber to read the file
+    _   <-  IO.sleep(2.seconds)                             >>
+            IO(s"Canceling reading of file $path").myDebug  >>
+            fib.cancel
+  } yield ()
+
+  /**
+   * Run this:
+   * override def run: IO[Unit] = cancelReadFile("src/main/scala/part3concurrency/Resources.scala").void
+   *
+   * Output:
+   * [io-compute-3] opening file at src/main/scala/part3concurrency/Resources.scala
+   * ...
+   * [io-compute-2] Canceling reading of file src/main/scala/part3concurrency/Resources.scala
+   * [io-compute-2] closing file at src/main/scala/part3concurrency/Resources.scala
+   */
+
+  //---------------------------------------------------------------------------
+  // Nested resources
+
+  // First let's create a resource from Connection
+  def makeResourceFromConnection(scanner: Scanner): Resource[IO, Connection] =
+    Resource.make {
+      IO(new Connection(scanner.nextLine())) // acquire the resource
+    } { conn =>
+      IO("closing connection").myDebug >>
+      conn.close().void                    // release it
+    }
+
+  // Create nested resources using flatMap
+  // Make file resource first and then make connection resource
+  def connFromConfigResource(path: String): Resource[IO, Connection] =
+    makeResourceFromFile(path) flatMap makeResourceFromConnection
+
+  // Equivalent code with for comprehension. This code is cleaner and
+  // easier to understand
+  def connFromConfigResourceClean(path: String): Resource[IO, Connection] =
+    for {
+      scanner <- makeResourceFromFile(path)
+      conn    <- makeResourceFromConnection(scanner)
+    } yield conn
+
+  val openConnection =
+    connFromConfigResourceClean("src/main/resources/connection.txt")
+      .use(conn => conn.open() >> IO.never)
+  // connection + file will close automatically
+
+  /**
+   * Run the following:
+   * override def run: IO[Unit] = openConnection.void
+   *
+   * Output:
+   * [io-compute-2] opening file at src/main/resources/connection.txt
+   * [io-compute-2] opening connection to rockthejvm.com
+   * [io-compute-2] closing connection
+   * [io-compute-2] closing connection to rockthejvm.com
+   * [io-compute-2] closing file at src/main/resources/connection.txt
+   */
+
+  // Cancel the connection
+  val canceledConnection: IO[Unit] = for {
+    fib <- openConnection.start
+    _   <- IO.sleep(2.seconds) >> IO("canceling fiber!").myDebug >> fib.cancel
+  } yield ()
+
+  /**
+   * Run:
+   * override def run: IO[Unit] = canceledConnection
+   *
+   * Output:
+   * [io-compute-3] opening file at src/main/resources/connection.txt
+   * [io-compute-3] opening connection to rockthejvm.com
+   * [io-compute-0] canceling fiber!
+   * [io-compute-0] closing connection
+   * [io-compute-0] closing connection to rockthejvm.com
+   * [io-compute-0] closing file at src/main/resources/connection.txt
+   */
+
+  /**
+   * One of the reasons Resource is so powerful is that resource acquisition
+   * and cancellation can happen automatically regardless of whether we are
+   * using sequential processing or concurrent processing with a fiber.
+   *
+   */
+  //---------------------------------------------------------------------------
+  // Finalizers
+
+  // Finalizers can also be attached to regular IOs i.e. to regular effects.
+  // The finalizer is called regardless of whether the IO is successful or
+  // if it fails or is canceled.
+  val ioWithFinalizer =
+    IO("some resource").myDebug guarantee IO("freeing resource").myDebug.void
+
+  /**
+   * Run:
+   *  override def run: IO[Unit] = ioWithFinalizer.void
+   *
+   * Output:
+   * [io-compute-1] some resource
+   * [io-compute-1] freeing resource
+   */
+
+  // We can also specify different finalizers for different outcomes such as
+  // success, failure, cancellations
+  import cats.effect.kernel.Outcome.{Succeeded, Errored, Canceled}
+
+  val ioWithFinalizer_v2 = IO("some resource").myDebug.guaranteeCase {
+    case Succeeded(fa) => for {
+                            result <- fa
+                            _ <- IO(s"releasing resource $result").myDebug
+                          } yield ()
+    case Errored(e) => IO("nothing to release").myDebug.void
+    case Canceled() => IO("resource got canceled, releasing what's left").myDebug.void
+  }
+
+  // Equivalent code for the Succeeded case using flatMap instead of for comprehension
+  val ioWithFinalizer_v3 = IO("some resource").myDebug.guaranteeCase {
+    case Succeeded(fa)  => fa.flatMap(result => IO(s"releasing resource $result").myDebug).void
+    case Errored(e)     => IO("nothing to release").myDebug.void
+    case Canceled()     => IO("resource got canceled, releasing what's left").myDebug.void
+  }
+
+  //---------------------------------------------------------------------------
+  override def run: IO[Unit] = ioWithFinalizer.void
+
 }
