@@ -238,44 +238,48 @@ object RacingIOs extends IOApp.Simple {
     }
   }
 
+  //---------------------------------------------------------------------------
   /**
-   * Attempt to simplify the code and prevent code duplication did not work
-   * because Scala does not have dependent types. Should revisit this another day,
-   * maybe by passing wrapper types G[_] and H[_] for the Outcome and Fiber in
-   * the handleWinnerLoser helper function.
-   *
-   * Here the answer ends up having the type Either[A, B] | Either[B, A], when
-   * what we want is always Either[A, B].
-  def simpleRace_v2[A, B](ioa: IO[A], iob: IO[B]): IO[Either[A, B]] =
-    for {
-      raceResult  <- IO.racePair(ioa, iob)
-      answer      <- raceResult match {
-        case Left((outA, fibB))   => handleWinnerLoser[A, B](outA, fibB, Left(_), Right(_))
-        case Right((fibA, outB))  => handleWinnerLoser[B, A](outB, fibA, Right(_), Left(_))
-      }
-    } yield answer
-  */
+   * Same functionality as simpleRace, but refactored to eliminate code
+   * duplication. The helper method makes innovative use of type parameters
+   * W and L for Winner and Loser.
+   */
+  def simpleRace_v2[A, B](ioa: IO[A], iob: IO[B]): IO[Either[A, B]] = {
+    // Helper method to handle the winner's outcome and the loser's fiber
+    def handleWinner[W, L](
+          winnerOutcome:  OutcomeIO[W],
+          loserFiber:     FiberIO[L],
+          wrapWinner:     W => Either[A, B],  // function to wrap the winner's result
+          wrapLoser:      L => Either[A, B]   // function to wrap the loser's result
+        ): IO[Either[A, B]] = {
+      winnerOutcome match {
+        // Cancel loser's fiber and wrap result in Left(_) if A won and Right(_) if B won
+        case Succeeded(effectW) => loserFiber.cancel >> effectW map wrapWinner
 
-  // This helper function compiles but is of no use.
-  def handleWinnerLoser[L, R](
-      winnerOutcome: OutcomeIO[L],  // Sometimes the winnerOutcome type is OutcomeIO[R],
-      loserFiber:    FiberIO[R],    // in which case the loserFiber type is FiberIO[L]
-      winnerWrap:    L => Either[L, R],
-      loserWrap:     R => Either[L, R]): IO[Either[L, R]] =
-    for {
-      winnerResult <- winnerOutcome match {
-        case Succeeded(fa) => fa map winnerWrap
-        case Errored(e) => IO.raiseError(e)
-        case Canceled() =>
+        // Since the winning action failed, cancel the loser's fiber and propagate the error
+        case Errored(ex)        => loserFiber.cancel >> IO.raiseError(ex)
+
+        // Since the winning action was canceled, join the loser's fiber, examine its
+        // outcome and either return its success (wrapped appropriately), propagate its
+        // error, or raise an exception if both were canceled.
+        case Canceled()         =>
           loserFiber.join flatMap {
-            case Succeeded(fb) => fb map loserWrap
-            case Errored(e) => IO.raiseError(e)
-            case Canceled() => IO.raiseError(new RuntimeException("No winners since both computations canceled"))
+            case Succeeded(effectL) => effectL map wrapLoser
+            case Errored(ex)        => IO.raiseError(ex)
+            case Canceled()         => IO.raiseError(new RuntimeException("No winners since both computations canceled"))
           }
       }
-      _ <- loserFiber.cancel // Ensure loser is canceled if not already
-    } yield winnerResult
+    }
 
-  //---------------------------------------------------------------------------
+    IO.racePair(ioa, iob) flatMap {
+      // Winner is A, loser is B; winner's result is wrapped with Left(_), loser's with Right(_)
+      case Left((outA, fibB))   => handleWinner(outA, fibB, Left(_), Right(_))
+
+      // Winner is B, loser is A; winner's result is wrapped with Right(_), loser's with Left(_)
+      case Right((fibA, outB))  => handleWinner(outB, fibA, Right(_), Left(_))
+    }
+  }
+
+
   override def run: IO[Unit] = testUnrace().myDebug.void
 }
