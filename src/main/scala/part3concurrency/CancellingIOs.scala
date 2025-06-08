@@ -181,7 +181,97 @@ object CancellingIOs extends IOApp.Simple {
     Uncancelable calls are MASKS that suppress cancellation.
     Poll calls are GAPS opened in the uncancellable region.
    */
+
   //---------------------------------------------------------------------------
-  override def run: IO[Unit] = authProgramPartlyCancellable
+  /**
+   * Exercises
+   */
+  // 1
+  val cancelBeforeMol: IO[Int] = IO.canceled >> IO(42).myDebug
+
+  // IO.uncancelable undoes the effect of IO.cancelable in the following val.
+  // It eliminates ALL the cancel points in the IO chain regardless of whether
+  // the cancellation is attempted from another fiber or the same fiber (the
+  // latter of which is the case here.) It eliminates all cancel points
+  // except the ones protected by poll, of which there aren't any here.
+
+  val uncancelableMol: IO[Int] = IO.uncancelable(_ => IO.canceled >> IO(42).myDebug)
+  // Output: [io-compute-3] 42
+
+  // 2
+  val invincibleAuthProgram: IO[Unit] = for {
+    authFib <- IO.uncancelable(_ => authFlowPartlyCancellable).start
+    _       <- IO.sleep(3.seconds) >> IO("Authentication timeout, attempting cancel...").myDebug >> authFib.cancel
+    _       <- authFib.join
+  } yield ()
+
+  // The authFlowPartlyCancellable was wrapped in uncancelable but had a poll
+  // gap for inputPassword. Wrapping auth flow in another uncancelable closes
+  // that gap, so that none of the components in its chain will be cancelable.
+  // Which means this auth flow will be atomic (uncancelable) no matter how
+  // long we wait before attempting to cancel the auth fiber. The output
+  // bears this out:
+
+  /**
+   * Run:
+   * override def run: IO[Unit] = invincibleAuthProgram
+   *
+   * Output:
+   * [io-compute-0] Input password:
+   * [io-compute-0] (typing password)
+   * [io-compute-3] Authentication timeout, attempting cancel...
+   * [io-compute-0] verifying...
+   * [io-compute-0] Authentication successful.
+   */
+
+  //---------------------------------------------------------------------------
+  // 3.
+  // Question: Will 'second cancelable' get printed to the console?
+  // (The correct answer is No.)
+  def threeStepProgram(): IO[Unit] = {
+    val sequence = IO.uncancelable { poll =>
+      poll(IO("first cancelable").myDebug   >> IO.sleep(1.second) >> IO("first cancelable end").myDebug)  >>
+      IO("uncancelable").myDebug            >> IO.sleep(1.second) >> IO("uncancelable end").myDebug       >>
+      poll(IO("second cancelable").myDebug  >> IO.sleep(1.second) >> IO("second cancelable end").myDebug)
+    }
+
+    for {
+      fib <- sequence.start
+      _ <- IO.sleep(1500.millis) >> IO("CANCELING").myDebug >> fib.cancel
+      _ <- fib.join
+    } yield ()
+  }
+
+  /**
+   * Since we are sending the cancel signal after 1.5 seconds, right in the
+   * middle of the uncancelable effect, we would expect the signal to get
+   * ignored, which means 'second cancelable' should print to the console.
+   * But it does not, as shown by the following output. (This was run
+   * BEFORE adding the IO("... end") statements to the 3 regions
+   *
+   * [io-compute-3] first cancelable
+   * [io-compute-3] uncancelable
+   * [io-compute-2] CANCELING
+   *
+   * That's because even though the cancel signal is ignored by the
+   * uncancelable region, it is acted upon as soon as it enters the scope of
+   * the next available cancelable region of the sequence, the
+   * 'second cancelable' region. That effect is therefore canceled. The cancel
+   * signal is valid throughout the ENTIRE SCOPE of the sequence effect.
+   *
+   * If there were no other cancelable regions in the rest of the sequence, the
+   * cancel signal would have been ignored.
+   *
+   * Output after adding the IO("... end") statements to the 3 regions:
+   *
+   * [io-compute-1] first cancelable
+   * [io-compute-1] first cancelable end
+   * [io-compute-1] uncancelable
+   * [io-compute-2] CANCELING
+   * [io-compute-1] uncancelable end
+   */
+
+  //---------------------------------------------------------------------------
+  override def run: IO[Unit] = threeStepProgram()
 
 }
