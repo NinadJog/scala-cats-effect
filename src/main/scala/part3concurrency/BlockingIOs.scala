@@ -1,9 +1,9 @@
 package part3concurrency
 
 import cats.effect.{IO, IOApp}
-import scala.concurrent.duration._
-import utils._
-import java.util.concurrent.Executors
+import scala.concurrent.duration.*
+import utils.*
+import java.util.concurrent.{ExecutorService, Executors}
 import scala.concurrent.ExecutionContext
 
 object BlockingIOs extends IOApp.Simple {
@@ -41,7 +41,7 @@ object BlockingIOs extends IOApp.Simple {
   // different thread pool to avoid blocking on the main execution context.
   // The created effect is uncancelable.
   val aBlockingIO: IO[Int] = IO.blocking {
-    Thread.sleep(1000)
+    Thread sleep 1000
     println(s"[${Thread.currentThread().getName}] computed a blocking code")
     42
   } // evaluates on a thread from ANOTHER thread pool specific for blocking calls
@@ -94,10 +94,11 @@ object BlockingIOs extends IOApp.Simple {
    * execution context only when we need it. If we call it through main then
    * daemon threads survive even after the computation finishes.
    */
+  val threadPool: ExecutorService = Executors newFixedThreadPool 8
+
   def testThousandEffectsSwitch(): IO[Int] = {
-    val ec: ExecutionContext =
-      ExecutionContext.fromExecutorService(Executors.newFixedThreadPool(8))
-    thousandCedes.evalOn(ec)
+    val ec = ExecutionContext fromExecutorService threadPool
+    thousandCedes evalOn ec
   }
 
   /**
@@ -120,5 +121,5 @@ object BlockingIOs extends IOApp.Simple {
   */
 
   //---------------------------------------------------------------------------
-  override def run: IO[Unit] = testThousandEffectsSwitch().void
+  override def run: IO[Unit] = testThousandEffectsSwitch().void >> IO(threadPool.shutdown())
 }
