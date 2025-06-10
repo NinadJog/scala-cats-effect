@@ -2,10 +2,14 @@ package part4coordination
 
 import cats.effect.{IO, IOApp, Ref}
 import utils._
+import scala.concurrent.duration._
 
 object Refs extends IOApp.Simple {
 
   // A Ref is a purely functional atomic reference. Modifications are always thread-safe.
+  // The Ref concurrency primitive facilitates purely functional, thread-safe
+  // concurrency management.
+  // Interacting with a Ref is also an effect!
 
   // We have to type a ref with the effect type, in this case IO. Ref is very
   // generic and can take any effect type.
@@ -17,7 +21,8 @@ object Refs extends IOApp.Simple {
   val atomicMol_v2: IO[Ref[IO, Int]] = IO ref 42
 
   // A Ref is a wrapper over a value that we can modify in a purely functional
-  // way and returning an effect.
+  // way and returns an effect.
+
   // 1. modifying is an effect
   val increasedMol:     IO[IO[Unit]] = atomicMol map (ref => ref.set(43))
   val increasedMol_v2:  IO[IO[Unit]] = atomicMol map (_.set(43))
@@ -194,7 +199,138 @@ object Refs extends IOApp.Simple {
    * [io-compute-2] New total: 3
    */
 
+  //===========================================================================
+  // Exercises
+
+  // 1. Convert the following impure program to pure using Refs and thread safety
+
+  /**
+   * Clock ticks every second. Print the current time every second on each
+   * tick. Also count the number of ticks and print the number every 5 seconds
+   */
+  def tickingClockImpure(): IO[Unit] = {
+    var ticks: Long = 0L
+
+    // Ticks every second. Prints the current time at each tick.
+    def tickingClock: IO[Unit] = for {
+      _ <- IO.sleep(1.second)
+      _ <- IO(System.currentTimeMillis()).myDebug // print the current time
+      _ <- IO(ticks += 1) // increment the number of ticks. Not thread safe
+      _ <- tickingClock
+    } yield ()
+
+    // Prints the number of ticks every 5 seconds
+    def printTicks: IO[Unit] = for {
+      _ <- IO.sleep(5.seconds)
+      _ <- IO(s"TICKS = $ticks").myDebug
+      _ <- printTicks
+    } yield ()
+
+    // Start the ticking clock and print ticks concurrently on two different fibers
+    for {
+      _ <- (tickingClock, printTicks).parTupled
+    } yield ()
+  }
+  /**
+   * Sample output of impure version: (The 2 fibers executed on different threads.)
+   *
+   * [io-compute-1] 1749560516107
+   * [io-compute-1] 1749560517113
+   * [io-compute-1] 1749560518114
+   * [io-compute-1] 1749560519115
+   * [io-compute-2] TICKS = 4
+   */
+
   //---------------------------------------------------------------------------
-  override def run: IO[Unit] = demoConcurrentWorkPure()
+  // Pure version using Refs and thread safety. This is a correct version
+  def tickingClockPure(): IO[Unit] = {
+
+    // Ticks every second. Prints the current time at each tick.
+    def tickingClock(ticks: Ref[IO, Long]): IO[Unit] = for {
+      _ <- IO.sleep(1.second)
+      _ <- IO(System.currentTimeMillis()).myDebug // print the current time
+      _ <- ticks update (_ + 1) // increment the number of ticks. thread-safe effect
+      _ <- tickingClock(ticks)
+    } yield ()
+
+    // Prints the number of ticks every 5 seconds
+    def printTicks(ticks: Ref[IO, Long]): IO[Unit] = for {
+      _         <- IO.sleep(5.seconds)
+      tickCount <- ticks.get
+      _         <- IO(s"TICKS = $tickCount").myDebug
+      _         <- printTicks(ticks)
+    } yield ()
+
+    // Start the ticking clock and print ticks concurrently on two different fibers
+    for {
+      initialTicks <- IO ref 0L // Same as 'Ref[IO] of 0L' initialTicks has type Ref[IO, Long]
+      _ <- (tickingClock(initialTicks), printTicks(initialTicks)).parTupled
+    } yield ()
+  }
+  /**
+   * Sample output of pure version: (Both fibers executed on the same thread)
+   * [io-compute-3] 1749564079874
+   * [io-compute-3] 1749564080880
+   * [io-compute-3] 1749564081881
+   * [io-compute-3] 1749564082883
+   * [io-compute-3] TICKS = 4
+   */
+
+  //---------------------------------------------------------------------------
+  /**
+   * This implementation is WRONG even though it uses a Ref for the ticks
+   * because there's a race condition for the ticks resource, as it is not
+   * passed explicitly between the two methods that use it.
+   *
+   * So the tick count NEVER get updated; it stays at 0. That's because the
+   * code 't <- ticks' provides a NEW reference every time this IO is evaluated,
+   * a reference initialized to 0. So the tickCount is always 0.
+   *
+   * Moral of the story: When we pass ticks as a parameter to the two methods,
+   * ticks should be of type Ref[...], NOT of IO[Ref[...]]. If we use
+   * IO[Ref[...]], it will create a NEW ticks reference every time the IO
+   * effect is evaluated. So we should make sure that we UNPACK IOs that wrap
+   * concurrency primitives such as ref, deferred, etc.
+   *
+   * The above method tickingClockPure() has the correct implementation.
+   */
+  def tickingClockWeird(): IO[Unit] = {
+    val ticks: IO[Ref[IO, Long]] = IO ref 0L  // initialize ticks to 0.
+
+    // Ticks every second. Prints the current time at each tick.
+    def tickingClock: IO[Unit] = for {
+      t <- ticks  // Ticks provides a NEW reference every time this IO is evaluated
+      _ <- IO.sleep(1.second)
+      _ <- IO(System.currentTimeMillis()).myDebug // print the current time
+      _ <- t update (_ + 1) // increment the number of ticks
+      _ <- tickingClock
+    } yield ()
+
+    // Prints the number of ticks every 5 seconds
+    def printTicks: IO[Unit] = for {
+      t         <- ticks // Ticks provides a NEW reference every time this IO is evaluated
+      _         <- IO.sleep(5.seconds)
+      tickCount <- t.get
+      _         <- IO(s"TICKS = $tickCount").myDebug
+      _         <- printTicks
+    } yield ()
+
+    // Print time and tick count in parallel on two different fibers
+    for {
+      _ <- (tickingClock, printTicks).parTupled
+    } yield ()
+  }
+  /**
+   * Sample output (ticks is ALWAYS 0):
+   *
+   * [io-compute-1] 1749565404369
+   * [io-compute-1] 1749565405374
+   * [io-compute-1] 1749565406375
+   * [io-compute-1] 1749565407376
+   * [io-compute-0] TICKS = 0
+   */
+
+  //---------------------------------------------------------------------------
+  override def run: IO[Unit] = tickingClockWeird()
 
 }
