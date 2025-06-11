@@ -1,9 +1,10 @@
 package part4coordination
 
 import cats.effect.kernel.Deferred
-import cats.effect.{IO, IOApp, Ref}
-import scala.concurrent.duration._
-import utils._
+import cats.effect.{FiberIO, IO, IOApp, OutcomeIO, Ref}
+import scala.concurrent.duration.*
+import cats.effect.kernel.Outcome.{Succeeded, Errored, Canceled}
+import utils.*
 
 /**
  * A Deferred is a concurrency primitive for waiting for an effect (an IO)
@@ -213,7 +214,6 @@ object Defers extends IOApp.Simple {
       _           <- fileTasks.join
     } yield ()
   }
-
   /**
    * The output is much more compact this time:
    *
@@ -226,6 +226,123 @@ object Defers extends IOApp.Simple {
    * [io-compute-3] [notifier] File download complete!
    */
 
+  //===========================================================================
+  // Exercises
+
+  /**
+   * 1. (Medium) Write a small alarm notification with two simultaneous IOs
+   * - one fiber increments a counter every second (a clock)
+   *   (hint: counter is the shared state, so use a Ref)
+   * - another that waits for the counter to reach 10, then prints a message
+   *   saying, "time's up!" (hint: the structure of this program is similar to
+   *   that of demoDeferred.)
+   */
+  def alarmNotification(): IO[Unit] = {
+
+    // The notifier is a consumer. The signal is a Deferred Unit because
+    // there's no content to be sent; just a notification that 10 seconds
+    // have passed.
+    def notifier(signal: Deferred[IO, Unit]): IO[Unit] =
+      for {
+        _ <- IO("[notifier] waiting for 10 seconds to pass...").myDebug
+        _ <- signal.get  // blocks the calling fiber
+        _ <- IO(s"[notifier] time's up!").myDebug
+      } yield ()
+
+    // The clock acts as a producer
+    def tickingClock(ticks:   Ref[IO, Int],
+                     signal:  Deferred[IO, Unit]): IO[Unit] =
+      for {
+        _       <- IO.sleep(1.second)
+        seconds <- ticks updateAndGet (_ + 1)
+        _       <- IO(s"[clock] $seconds").myDebug
+        _       <- if seconds >= 10 then
+                     IO(s"[clock] 10 seconds have passed").myDebug >>
+                     (signal complete ()) // unblocks the calling fiber
+                   else
+                     tickingClock(ticks, signal) // clock continues ticking if < 10 seconds
+      } yield ()
+
+    for {
+      ticksRef    <- Ref[IO] of 0
+      signal      <- Deferred[IO, Unit]    // signal has type Deferred[IO, Int]
+      fibNotifier <- notifier(signal).start
+      fibClock    <- tickingClock(ticksRef, signal).start
+      _           <- fibClock.join
+      _           <- fibNotifier.join
+    } yield ()
+  }
+
+  /**
+   * [io-compute-2] [notifier] waiting for 10 seconds to pass...
+   * [io-compute-0] [clock] 1
+   * [io-compute-0] [clock] 2
+   * ...
+   * [io-compute-0] [clock] 10
+   * [io-compute-0] [clock] 10 seconds have passed
+   * [io-compute-1] [notifier] time's up!
+   */
+
   //---------------------------------------------------------------------------
-  override def run: IO[Unit] = fileNotifierWithDeferred()
+  /**
+   * 2. (Mega hard) Implement a racePair with Deferred.
+   * - Use a Deferred which can hold an Either[outcome for ioa, outcome for iob]
+   * - start two fibers, one for each IO
+   * - on completion (with any status), each IO needs to complete that Deferred
+   *   (hint 1: use a finalizer from the Resources lesson)
+   *   (hint 2: use a guarantee call to make sure the fibers complete the Deferred)
+   * - what do you do in case of cancellation (the hardest part)?
+   *
+   */
+
+  // Use the following type aliases from Cats Effect to simplify the type signature
+  //  type FiberIO[A]   = Fiber[IO, Throwable, A]
+  //  type OutcomeIO[A] = Outcome[IO, Throwable, A]
+
+  type RaceResult[A, B] =
+    Either[(OutcomeIO[A], FiberIO[B]),
+           (FiberIO[A],   OutcomeIO[B])]
+
+  // outcome of either io
+  type EitherOutcome[A, B] = Either[OutcomeIO[A], OutcomeIO[B]]
+
+  /**
+   * Add finalizer to complete signal regardless of result of completion of fiber
+   * The blocking call 'signal.get' should be cancelable because we would
+   * like to cancel the race pair from a different fiber if signal.get is
+   * taking forever. So mark the entire for comprehension as uncancelable
+   * but make signal.get uncancelable by wrapping it in poll.
+   *
+   * What if ioa and iob are two effect chains in which some IOs are cancelable
+   * and others are not?
+   */
+  def ourRacePair[A, B](ioa: IO[A], iob: IO[B]): IO[RaceResult[A, B]] = {
+
+    // Helper method to cancel both fibers. Start separate fibers to cancel
+    // fibA and fibB because we want to cancel both of them at the same time.
+    def cancelFibers(fibA: FiberIO[A], fibB: FiberIO[B]): IO[Unit] =
+      for { // Start separate fibers to cancel fibA and fibB because we want both of them to be canceled at the same time
+        cancelFibA <- fibA.cancel.start
+        cancelFibB <- fibB.cancel.start
+        _ <- cancelFibA.join  // These joins can happen in the future; we don't care
+        _ <- cancelFibB.join
+      } yield ()
+
+    //-----------------------
+    IO.uncancelable { poll =>
+      for {
+        signal  <- Deferred[IO, EitherOutcome[A, B]]
+        fibA    <- (ioa guaranteeCase (outcomeA => (signal complete Left(outcomeA)).void)).start
+        fibB    <- (iob guaranteeCase (outcomeB => (signal complete Right(outcomeB)).void)).start
+        result  <- poll(signal.get) onCancel cancelFibers(fibA, fibB) // blocking call waits for either fibA or fibB to complete. should be cancelable
+
+      } yield result match {
+        case Left(outcomeA) => Left(outcomeA, fibB) // A won
+        case Right(outcomeB) => Right(fibA, outcomeB) // B won
+      }
+    }
+  }
+
+  //---------------------------------------------------------------------------
+  override def run: IO[Unit] = alarmNotification()
 }

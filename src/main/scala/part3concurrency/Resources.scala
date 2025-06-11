@@ -369,7 +369,7 @@ object Resources extends IOApp.Simple {
   // success, failure, cancellations
   import cats.effect.kernel.Outcome.{Succeeded, Errored, Canceled}
 
-  val ioWithFinalizer_v2 = IO("some resource").myDebug.guaranteeCase {
+  val ioWithFinalizer_v2 = IO("some resource").myDebug guaranteeCase {
     case Succeeded(fa) => for {
                             result <- fa
                             _ <- IO(s"releasing resource $result").myDebug
@@ -379,7 +379,7 @@ object Resources extends IOApp.Simple {
   }
 
   // Equivalent code for the Succeeded case using flatMap instead of for comprehension
-  val ioWithFinalizer_v3 = IO("some resource").myDebug.guaranteeCase {
+  val ioWithFinalizer_v3 = IO("some resource").myDebug guaranteeCase {
     case Succeeded(fa)  => fa.flatMap(result => IO(s"releasing resource $result").myDebug).void
     case Errored(e)     => IO("nothing to release").myDebug.void
     case Canceled()     => IO("resource got canceled, releasing what's left").myDebug.void

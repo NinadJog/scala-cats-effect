@@ -115,16 +115,16 @@ object RacingIOs extends IOApp.Simple {
    */
   def timeout[A](io: IO[A], duration: FiniteDuration): IO[A] = {
 
-    val timeoutIO = IO.sleep(duration)
-    val result    = IO.race(io, timeoutIO)
+    val timeoutIO:  IO[Unit]            = IO sleep duration
+    val result:     IO[Either[A, Unit]] = IO race(io, timeoutIO)
 
     result flatMap {
       case Left(value) => IO(value)
-      case Right(_)    => IO.raiseError(new RuntimeException("Computation timed out"))
+      case Right(_)    => IO raiseError new RuntimeException("Computation timed out")
     }
   }
 
-  val importantTask = IO.sleep(2.seconds) >> IO(42).myDebug
+  val importantTask = (IO sleep 2.seconds) >> IO(42).myDebug
   val testTimeout = timeout(importantTask, 1.seconds)
 
   // The timeout pattern is so commonly used that CE provides an API for it:
@@ -147,14 +147,14 @@ object RacingIOs extends IOApp.Simple {
   def unrace[A, B](ioa: IO[A], iob: IO[B]): IO[Either[A, B]] =
     IO.racePair(ioa, iob) flatMap {
       case Left((_, fiberB)) => fiberB.join flatMap {  // ioa won but we return iob
-        case Succeeded(resultEffect)  => resultEffect.map(Right(_))
-        case Errored(e)               => IO.raiseError(e)
-        case Canceled()               => IO.raiseError(new RuntimeException("Loser canceled"))
+        case Succeeded(resultEffect)  => resultEffect map (Right(_))
+        case Errored(e)               => IO raiseError e
+        case Canceled()               => IO raiseError new RuntimeException("Loser canceled")
       }
       case Right((fiberA, _)) => fiberA.join.flatMap {  // iob won but we return ioa
-        case Succeeded(resultEffect)  => resultEffect.map(Left(_))
-        case Errored(e)               => IO.raiseError(e)
-        case Canceled()               => IO.raiseError(new RuntimeException("Loser canceled"))
+        case Succeeded(resultEffect)  => resultEffect map (Left(_))
+        case Errored(e)               => IO raiseError e
+        case Canceled()               => IO raiseError new RuntimeException("Loser canceled")
       }
   }
 
@@ -162,7 +162,7 @@ object RacingIOs extends IOApp.Simple {
   // of nested flatMaps. Same logic as the above version
   def unrace_v2[A, B](ioa: IO[A], iob: IO[B]): IO[Either[A, B]] =
     for {
-      raceResult  <- IO.racePair(ioa, iob)
+      raceResult  <- IO racePair (ioa, iob)
       result      <- raceResult match {
         case Left(_, fiberB)  => handleLosingFiber(fiberB) map (Right(_))
         case Right(fiberA, _) => handleLosingFiber(fiberA) map (Left(_))
@@ -175,8 +175,8 @@ object RacingIOs extends IOApp.Simple {
       outcome <- fiber.join
       result  <- outcome match {
         case Succeeded(resultEffect)  => resultEffect
-        case Errored(e)               => IO.raiseError(e)
-        case Canceled()               => IO.raiseError(new RuntimeException("Loser canceled"))
+        case Errored(e)               => IO raiseError e
+        case Canceled()               => IO raiseError new RuntimeException("Loser canceled")
       }
     } yield result
 
@@ -218,21 +218,21 @@ object RacingIOs extends IOApp.Simple {
       case Left((outA, fibB))   => outA match { // outA: OutcomeIO[A], fibB: FiberIO[B]
         // effectA: IO[A], whereas (effectA map (Left(_))): IO[Left[A]]
         case Succeeded(effectA) => fibB.cancel >> effectA map (Left(_)) // A is the winner
-        case Errored(ex)        => fibB.cancel >> IO.raiseError(ex) // fibB: FiberIO[B]
+        case Errored(ex)        => fibB.cancel >> (IO raiseError ex) // fibB: FiberIO[B]
         case Canceled()         => fibB.join flatMap {  // A is the loser since it has been canceled
           case Succeeded(effectB) => effectB map (Right(_)) // B is the real winner
-          case Errored(ex) => IO.raiseError(ex)
-          case Canceled() => IO.raiseError(new RuntimeException("No winners since both computations canceled"))
+          case Errored(ex) => IO raiseError ex
+          case Canceled() => IO raiseError new RuntimeException("No winners since both computations canceled")
         }
       }
       case Right((fibA, outB))  => outB match { // outB: OutcomeIO[B], fibA: FiberIO[A]
         // effectB: IO[B], whereas (effectB map (Right(_))): IO[Right[B]
         case Succeeded(effectB) => fibA.cancel >> effectB map (Right(_))  // B is the winner
-        case Errored(ex)        => fibA.cancel >> IO.raiseError(ex)
+        case Errored(ex)        => fibA.cancel >> (IO raiseError ex)
         case Canceled()         => fibA.join flatMap {  // B is the loser since it has been canceled
           case Succeeded(effectA) => effectA map (Left(_)) // A is the real winner
-          case Errored(ex) => IO.raiseError(ex)
-          case Canceled() => IO.raiseError(new RuntimeException("No winners since both computations canceled"))
+          case Errored(ex) => IO raiseError ex
+          case Canceled() => IO raiseError new RuntimeException("No winners since both computations canceled")
         }
       }
     }
