@@ -179,7 +179,7 @@ object MutexPlayground extends IOApp.Simple {
     mutex <- Mutex.create
     results <- (1 to 10).toList parTraverse (createLockingTask(_, mutex))
   } yield results
-  // only one task will proceed at  a time
+  // only one task will proceed at a time
 
   //---------------------------------------------------------------------------
 
