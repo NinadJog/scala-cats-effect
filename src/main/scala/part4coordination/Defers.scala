@@ -3,7 +3,6 @@ package part4coordination
 import cats.effect.kernel.Deferred
 import cats.effect.{FiberIO, IO, IOApp, OutcomeIO, Ref}
 import scala.concurrent.duration.*
-import cats.effect.kernel.Outcome.{Succeeded, Errored, Canceled}
 import utils.*
 
 /**
