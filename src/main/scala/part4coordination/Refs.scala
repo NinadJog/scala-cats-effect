@@ -24,27 +24,28 @@ object Refs extends IOApp.Simple {
   // way and returns an effect.
 
   // 1. modifying is an effect
-  val increasedMol:     IO[IO[Unit]] = atomicMol map (ref => ref.set(43))
-  val increasedMol_v2:  IO[IO[Unit]] = atomicMol map (_.set(43))
+  val increasedMol:     IO[IO[Unit]] = atomicMol map (ref => ref set 43)
+  val increasedMol_v2:  IO[IO[Unit]] = atomicMol map (_ set 43) // same as _.set(43)
 
-  // 2. Since this is an effect of an effect, we usually use flatMap
-  val increasedMol_v3: IO[Unit] = atomicMol flatMap { _.set(43) } // always thread-safe
+  // 2. Since this is an effect of an effect, we usually use flatMap so that
+  //    the return type is IO[Unit] instead of IO[IO[Unit]]
+  val increasedMol_v3: IO[Unit] = atomicMol flatMap { _ set 43 } // always thread-safe
 
   // 3. Using a for comprehension
   val increasedMol_v4: IO[Unit] =
     for {
       ref <- atomicMol
-      _   <- ref.set(43)
+      _   <- ref set 43
     } yield ()
 
   // 4. obtain a value
   val mol: IO[Int] = atomicMol flatMap { _.get }
 
   // 5. get and set in a single operation. Returns the OLD value 42; sets the new one
-  val getSetMol: IO[Int] = atomicMol flatMap { _.getAndSet(43) }
+  val getSetMol: IO[Int] = atomicMol flatMap { _ getAndSet 43 }
 
   // 6. Updating with a function
-  val fMol: IO[Unit] = atomicMol flatMap { _.update(_ * 10) }
+  val fMol: IO[Unit] = atomicMol flatMap { _ update (_ * 10) }
 
   // same update in more elaborate notation:
   val fMol_v2: IO[Unit] =
@@ -52,12 +53,12 @@ object Refs extends IOApp.Simple {
     ref       update  { value => value * 10 }}
 
   // 7. Update with a function and get the NEW value
-  val updatedMol: IO[Int] = atomicMol flatMap { _.updateAndGet(_ * 10) } // will return IO(420)
+  val updatedMol: IO[Int] = atomicMol flatMap { _ updateAndGet (_ * 10) } // will return IO(420)
 
   // 8. Update with a function and get the OLD value
-  val updatedMolOld: IO[Int] = atomicMol flatMap { _.getAndUpdate(_ * 10) } // will return IO(42)
+  val updatedMolOld: IO[Int] = atomicMol flatMap { _ getAndUpdate (_ * 10) } // will return IO(42)
 
-  // 9. Modify the value inside and return a different effect type using a function
+  // 9. Modify the value inside and return a different effect type using a function.
   // modify's f is has type Int => (Int, B) where B is the different type that's surfaced out
   // This is a very powerful feature.
   val modifiedMol: IO[String] =
@@ -75,7 +76,7 @@ object Refs extends IOApp.Simple {
   // It contains a mixture of good and bad practices!
   def demoConcurrentWorkImpure(): IO[Unit] = {
     import cats.syntax.parallel._
-    var count = 0
+    var count = 0 // bad practice to use a var, as it's not thread-safe
 
     def task(workload: String): IO[Unit] = {
       val wordCount = workload.split(" ").length
@@ -116,15 +117,15 @@ object Refs extends IOApp.Simple {
   // We don't have variable allocations except in the effect constructors.
   // Still does NOT use Refs.
   def demoConcurrentWorkImpure_v2(): IO[Unit] = {
-    var count = 0
+    var count = 0 // bad practice
 
     def task(workload: String): IO[Unit] = {
       val wordCount = workload.split(" ").length
       for {
         _         <- IO(s"Counting words for workload '$workload': $wordCount").myDebug
-        newCount  <- IO(count + wordCount)
+        newCount  <- IO(count + wordCount) // execution is delayed by wrapping it in IO
         _         <- IO(s"New total: $newCount").myDebug
-        _         <- IO(count += wordCount)
+        _         <- IO(count += wordCount) // execution is delayed by wrapping it in IO
       } yield ()
     }
 

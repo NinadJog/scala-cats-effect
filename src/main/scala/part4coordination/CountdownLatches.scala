@@ -1,6 +1,6 @@
 package part4coordination
 
-import cats.effect.kernel.Resource
+import cats.effect.kernel.{Deferred, Ref, Resource}
 import cats.effect.std.CountDownLatch
 import cats.effect.{IO, IOApp}
 import cats.syntax.parallel.*
@@ -86,7 +86,7 @@ object CountdownLatches extends IOApp.Simple {
 
   //---------------------------------------------------------------------------
   /**
-   * Exercise. Simulate a multithreaded file downloader on a fictitious server.
+   * Exercise 1. Simulate a multithreaded file downloader on a fictitious server.
    *
    * Fetch all the chunks of the file in parallel on separate fibers. Each
    * fiber will be written as a temporary file on disk. When all the chunks
@@ -237,7 +237,7 @@ object CountdownLatches extends IOApp.Simple {
   // INSTRUCTOR'S SOLUTION
 
   def createFileDownloaderTask (id:         Nat,
-                                latch:      CountDownLatch[IO],
+                                latch:      CDLatch, // CountDownLatch[IO],
                                 filename:   String,
                                 destFolder: String): IO[Unit] =
     for {
@@ -268,7 +268,7 @@ object CountdownLatches extends IOApp.Simple {
   def downloadFile_v2(filename: String, destFolder: String): IO[Unit] =
     for {
       n     <- FileServer.getNumChunks
-      latch <- CountDownLatch[IO](n)
+      latch <- CDLatch(n) // CountDownLatch[IO](n) // also works correctly with the CDLatch we implemented
       _     <- IO(s"Download started on $n fibers").myDebug
       _     <- (0 until n).toList.parTraverse (createFileDownloaderTask(_, latch, filename, destFolder))
       _     <- latch.await  // wait for all the downloads to complete
@@ -293,6 +293,79 @@ object CountdownLatches extends IOApp.Simple {
    * [io-compute-3] File has been stitched together
    */
 
+  //===========================================================================
+  /**
+   * Exercise 2. Implement your own CDLatch with Ref and Deferred.
+   *
+   * Tested it by using it in the file downloader implemented earlier (search
+   * this file for CDLatch)
+   */
+
+  // Main API or co-data of the CDLatch
+  abstract class CDLatch {
+    def await:    IO[Unit]
+    def release:  IO[Unit]
+  }
+
+  // companion object. Its structure is inspired by that of Mutex.
+  object CDLatch {
+
+    /*
+      A countdown latch can be in one of two states. It can either be ACTIVE
+      when several fibers may be waiting on it or it can be FULFILLED or
+      COMPLETED because once a latch has been released, it cannot be reused.
+      Use a sealed trait to represent this sum data type.
+     */
+    sealed trait State
+    case object Done extends State  // latch that has been released
+    case class Live(remainingCount: Int, signal: Deferred[IO, Unit]) extends State // latch is live (not yet released)
+
+    /**
+     * Constructor for creating a countdown latch. Initialize the Ref AND the
+     * Deferred. In Mutex we initialized just the Ref but here we initialize
+     * both because the state (i.e. Ref + Deferred) will be alive for as long
+     * as the countdown latch is alive.
+     *
+     * In the 'state <- ...' statement of the following for comprehension, we
+     * specify [State] to the 'of' method so as not to confuse the compiler,
+     * because the Ref can also hold the other value of the State, which is Done.
+     */
+    def apply(count: Int): IO[CDLatch] = for {
+      signal  <- Deferred[IO, Unit]
+      state   <- Ref[IO].of[State](Live(count, signal))
+    } yield new CDLatch { // The await and release methods are the crux of the implementation
+
+      /**
+       * Await blocks the calling fiber until the CDLatch is released.
+       * If s is Done, await won't do anything; it won't block. So return
+       * IO.unit, as the latch is dead. Otherwise block on the signal
+       * semantically.
+       *
+       * await is cancellation-safe because if a fiber calls await and then gets
+       * canceled, it does not change the internal state of the CDLatch.
+       */
+      override def await: IO[Unit] = state.get flatMap { s =>
+        if s == Done then IO.unit else signal.get
+      }
+
+      /**
+       * This is the only place where the state of the CDLatch can be changed.
+       *
+       * Release should NOT be cancelable at all because if a fiber that is
+       * supposed to have called release gets canceled, it will block ALL the
+       * fibers that are waiting for the latch to be released.
+       */
+      override def release: IO[Unit] = state.modify {
+        case Done             => Done               -> IO.unit // latch is dead
+        case Live(1, signal)  => Done               -> (signal complete ()).void // call .void to discard the Boolean
+        case Live(n, signal)  => Live(n-1, signal)  -> IO.unit
+      }
+        .flatten
+        .uncancelable // same as wrapping it up in IO.uncancelable
+    }
+  } // object CDLatch
+
   //---------------------------------------------------------------------------
-  override def run: IO[Unit] = downloadFile_v2(filename = "myScalaFile.txt", destFolder = "src/main/resources")
+  override def run: IO[Unit] =
+    downloadFile_v2(filename = "myScalaFile.txt", destFolder = "src/main/resources")
 }

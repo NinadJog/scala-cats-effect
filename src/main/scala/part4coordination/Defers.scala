@@ -46,7 +46,7 @@ object Defers extends IOApp.Simple {
   val reader_v2: IO[Int] = aDeferred flatMap { _.get }  // same as above
 
   // A writer is an effect that completes a signal (i.e. a deferred) with some value.
-  val writer: IO[Boolean] = aDeferred flatMap { signal => signal complete 42}
+  val writer: IO[Boolean] = aDeferred flatMap { signal => signal complete 42 }
 
   // If the reader and writer are run on different threads, the reader fiber will
   // block (semantically) until the writer fiber completes. Upon completion,
@@ -69,7 +69,7 @@ object Defers extends IOApp.Simple {
 
     def producer(signal: Deferred[IO, Int]): IO[Unit] = for {
       _             <- IO("[producer] crunching numbers...").myDebug
-      _             <- IO.sleep(1.second)
+      _             <- IO sleep 1.second
       meaningOfLife <- IO(42)
       _             <- IO(s"[producer] complete: $meaningOfLife").myDebug
       _             <- signal complete meaningOfLife // unblocks the calling fiber

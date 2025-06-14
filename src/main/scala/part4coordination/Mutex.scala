@@ -9,8 +9,7 @@ import cats.syntax.parallel.*
 import scala.collection.immutable.Queue
 import cats.effect.kernel.Outcome.{Succeeded, Errored, Canceled}
 
-
-abstract  class Mutex {
+abstract class Mutex {
   def acquire: IO[Unit]
   def release: IO[Unit]
 }
@@ -29,6 +28,7 @@ object Mutex {
 
   def createSignal(): IO[Signal] = Deferred[IO, Unit]
 
+  // Initialize the Ref. This method can also be called apply instead of create
   def create: IO[Mutex] = (Ref[IO] of unlocked) map createMutexWithCancellation // createSimpleMutex
 
   //---------------------------------------------------------------------------
