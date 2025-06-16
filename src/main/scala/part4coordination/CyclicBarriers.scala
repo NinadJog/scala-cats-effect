@@ -100,9 +100,8 @@ object CyclicBarriers extends IOApp.Simple {
       }
 
       /*
-        It's WRONG to use a for comprehension instead of a flatMap after
-        creating a new signal, as the following code does. This code does not
-        work correctly. It has two issues.
+        It's WRONG to use a for comprehension instead of a flatMap as in the
+        the following code. It does not work correctly, as it has two issues.
 
         1. Premature Signal Creation: The newSignal is created before the state
         modification happens in the for comprehension. This means:
@@ -124,6 +123,11 @@ object CyclicBarriers extends IOApp.Simple {
         3) Some fibers might end up waiting on the wrong signal or a signal that
         never gets completed.
 
+        Separating the signal creation from the state modification breaks the
+        atomicity requirement of the operation, whereas using flatMap properly
+        sequences signal creation and state modification in a single atomic
+        operation.
+        
       def await_v2: IO[Unit] =
         for {
           newSignal <- Deferred[IO, Unit] // create a new signal
