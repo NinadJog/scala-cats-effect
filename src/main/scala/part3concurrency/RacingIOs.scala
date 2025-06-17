@@ -213,7 +213,7 @@ object RacingIOs extends IOApp.Simple {
    */
   // Cancel the loser's fiber. If the supposed winner gets canceled then the
   // loser becomes the de-facto winner unless it errors out or gets canceled.
-  def simpleRace[A, B](ioa: IO[A], iob: IO[B]): IO[Either[A, B]] = {
+  def simpleRace[A, B](ioa: IO[A], iob: IO[B]): IO[Either[A, B]] =
     IO.racePair(ioa, iob) flatMap {
       case Left((outA, fibB))   => outA match { // outA: OutcomeIO[A], fibB: FiberIO[B]
         // effectA: IO[A], whereas (effectA map (Left(_))): IO[Left[A]]
@@ -236,7 +236,6 @@ object RacingIOs extends IOApp.Simple {
         }
       }
     }
-  }
 
   //---------------------------------------------------------------------------
   /**
