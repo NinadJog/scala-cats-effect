@@ -257,7 +257,7 @@ object Defers extends IOApp.Simple {
         _       <- IO(s"[clock] $seconds").myDebug
         _       <- if seconds >= 10 then
                      IO(s"[clock] 10 seconds have passed").myDebug >>
-                     (signal complete ()) // unblocks the calling fiber
+                     signal.complete(()).void // unblocks the calling fiber. Added .void for consistency of return type
                    else
                      tickingClock(ticks, signal) // clock continues ticking if < 10 seconds
       } yield ()
