@@ -1,13 +1,15 @@
 package part4coordination
 
 import cats.effect.kernel.{Deferred, Ref}
-import cats.effect.{IO, IOApp}
+import cats.effect.{Concurrent, IO, IOApp}
+
 import scala.concurrent.duration.*
 import scala.util.Random
 import utils.*
 import cats.syntax.parallel.*
+
 import scala.collection.immutable.Queue
-import cats.effect.kernel.Outcome.{Succeeded, Errored, Canceled}
+import cats.effect.kernel.Outcome.{Canceled, Errored, Succeeded}
 
 abstract class Mutex {
   def acquire: IO[Unit]
@@ -134,6 +136,130 @@ object Mutex {
 
 } // object Mutex
 
+//===========================================================================
+// Exercise #2 from Polymorphic Coordination section: Generalize the mutex to
+// handle any effect type, not just IO
+
+// Import extension methods to make the map, flatMap, and onCancel methods work.
+import cats.syntax.flatMap._            // flatMap and flatten
+import cats.syntax.functor._            // map
+import cats.effect.syntax.monadCancel._ //onCancel
+
+abstract class GenMutex[F[_]] {
+  def acquire: F[Unit]
+  def release: F[Unit]
+}
+
+// Mutex generalized to any effect type
+object GenMutex {
+
+  // State stores the state of the mutex: whether it is locked or not and
+  // a queue of the fibers waiting for the mutex to be released.
+  type Signal[F[_]] = Deferred[F, Unit]
+
+  case class State[F[_]](locked: Boolean, waiting: Queue[Signal[F]])
+
+  // initial state of the mutex
+  def unlocked[F[_]]: State[F] = State[F](locked = false, waiting = Queue())
+  // Use an atomic ref to hold the state. Modify the state whenever anyone tries
+  // to acquire the mutex.
+
+  def createSignal[F[_]](using concurrent: Concurrent[F]): F[Signal[F]] =
+    concurrent.deferred[Unit] // I had written: Deferred[F, Unit]
+
+  // Initialize the Ref. This method can also be called apply instead of create
+  def create[F[_]](using concurrent: Concurrent[F]): F[GenMutex[F]] =
+    (Ref[F] of unlocked) map createMutexWithCancellation // createSimpleMutex
+
+  //---------------------------------------------------------------------------
+  def createMutexWithCancellation[F[_]](state: Ref[F, State[F]])
+                                       (using concurrent: Concurrent[F]): GenMutex[F] =
+    new GenMutex[F] {
+
+      override def acquire: F[Unit] = concurrent.uncancelable { poll =>
+        createSignal.flatMap { signal =>
+
+          // Unlock the mutex if we get canceled while waiting. This is needed
+          // only for the cancellation logic. See detailed comment before this
+          // method about the cancellation flow.
+          val cleanup = state.modify {
+            case State(locked, queue) =>
+              val newQueue = queue filterNot (_ eq signal) // remove ourselves from the queue
+              State[F](locked, newQueue) -> release // release the mutex
+          }.flatten // Call flatten to change it from F[F[Unit]] to F[Unit]
+
+          state.modify { // has type F[F[Unit]]
+              case State(false, _) =>
+                State[F](locked = true, Queue()) -> concurrent.unit // arrow notation for tuples
+              case State(true, queue) =>
+                State[F](locked = true, queue enqueue signal) -> poll(signal.get).onCancel(cleanup)
+            }
+            .flatten // modify returns F[F[Unit]]. Flatten it to F[Unit]
+        }
+      }
+
+      /*
+        Releasing a lock should not be cancelable. But we don't need to wrap
+        this implementation in concurrent.uncancelable because state.modify is an
+        atomic operation on its own. So the release code works as it is.
+       */
+      override def release: F[Unit] =
+        state.modify {
+          case State(false, queue) => unlocked[F] -> concurrent.unit
+          case State(true, queue) =>
+            if queue.isEmpty then
+              unlocked[F] -> concurrent.unit // unlock the mutex
+            else { // queue is not empty
+              val (signal, rest) = queue.dequeue // take a signal out of the queue
+              State[F](true, rest) -> (signal complete()).void // complete the signal
+            }
+        }.flatten
+    } // new GenMutex
+
+  //---------------------------------------------------------------------------
+  // This was the original create method in the first exercise. It does NOT
+  // handle the case where one or more of the fibers can be canceled.
+  // The instructor deleted this method because it's useless, but I've left
+  // it here because I took the effort to generalize it to any effect type.
+  def createSimpleMutex[F[_]](state: Ref[F, State[F]])
+                             (using concurrent: Concurrent[F]): GenMutex[F] =
+    new GenMutex[F] {
+      /*
+        Change the state of the Ref:
+        - if the mutex is currently unlocked, state becomes (true, [])
+        - if the mutex is locked, state becomes (true, queue + signal) and wait on that signal
+       */
+      override def acquire: F[Unit] = createSignal.flatMap { signal =>
+        state.modify { // has type F[F[Unit]]
+          case State(false, _)    => State[F](locked = true, Queue()) -> concurrent.unit
+          case State(true, queue) => State[F](locked = true, queue enqueue signal) -> signal.get
+        }.flatten // modify returns F[F[Unit]]. Flatten it to F[Unit]
+      }
+
+      /*
+        Change the state of the Ref:
+        - If the mutex is unlocked, leave the state unchanged
+        - If the mutex is locked
+          - if the queue is empty, unlock the mutex i.e. state becomes (false, [])
+          - If the queue is not empty, take a signal out of the queue and complete it,
+            thereby unblocking a fiber waiting on it.
+       */
+      override def release: F[Unit] = // no need to create a new signal
+        state.modify {
+          case State(false, queue) => unlocked[F] -> concurrent.unit
+          case State(true, queue) =>
+            if queue.isEmpty then
+              unlocked[F] -> concurrent.unit // unlock the mutex
+            else { // queue is not empty
+              val (signal, rest) = queue.dequeue // take a signal out of the queue
+              State(true, rest) -> (signal complete()).void // complete the signal
+            }
+        }.flatten
+    } // new GenMutex
+
+} // object GenMutex
+
+
 //---------------------------------------------------------------------------
 object MutexPlayground extends IOApp.Simple {
 
@@ -153,7 +279,8 @@ object MutexPlayground extends IOApp.Simple {
     (1 to 10).toList parTraverse createNonLockingTask
 
   //---------------------------------------------------------------------------
-  def createLockingTask(id: Int, mutex: Mutex): IO[Int] = {
+  // Signature with old Mutex: def createLockingTask(id: Int, mutex: Mutex): IO[Int]
+  def createLockingTask(id: Int, mutex: GenMutex[IO]): IO[Int] = {
     for {
       _ <- IO(s"[task $id] waiting for permission...").myDebug
       _ <- mutex.acquire
@@ -176,7 +303,8 @@ object MutexPlayground extends IOApp.Simple {
    * and in order by task id.
    */
   def demoLockingTasks(): IO[List[Int]] = for {
-    mutex <- Mutex.create
+    mutex <- GenMutex.create[IO]
+    // old code with ordinary mutex: mutex <- Mutex.create
     results <- (1 to 10).toList parTraverse (createLockingTask(_, mutex))
   } yield results
   // only one task will proceed at a time
@@ -200,7 +328,8 @@ object MutexPlayground extends IOApp.Simple {
    *    mutex to do its own work will NOT be able to acquire the mutex because
    *    it has been locked, causing a DEADLOCK.
    */
-  def createCancelingTask(id: Int, mutex: Mutex): IO[Int] = {
+  // Old signature: def createCancelingTask(id: Int, mutex: Mutex): IO[Int]
+  def createCancelingTask(id: Int, mutex: GenMutex[IO]): IO[Int] = {
     if id % 2 == 0 then
       createLockingTask(id, mutex)
     else for {  // for odd ids, create a task and then cancel it. This is naughty behavior!
@@ -218,7 +347,8 @@ object MutexPlayground extends IOApp.Simple {
   }
 
   def demoCancelingTasks(): IO[List[Int]] = for {
-    mutex <- Mutex.create
+    mutex <- GenMutex.create[IO]
+    // old code: mutex <- Mutex.create
     results <- (1 to 10).toList parTraverse (createCancelingTask(_, mutex))
   } yield results
 

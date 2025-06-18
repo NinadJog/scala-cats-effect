@@ -1,9 +1,10 @@
 package part5polymorphic
 
 import cats.effect.kernel.Async
-import cats.effect.{Concurrent, Deferred, IO, IOApp, Ref, Spawn}
-import scala.concurrent.duration._
-import utils.general._
+import cats.effect.{Concurrent, Deferred, Fiber, FiberIO, IO, IOApp, Outcome, OutcomeIO, Ref, Spawn}
+
+import scala.concurrent.duration.*
+import utils.general.*
 
 object PolymorphicCoordination extends IOApp.Simple {
 
@@ -55,7 +56,7 @@ object PolymorphicCoordination extends IOApp.Simple {
   import cats.syntax.flatMap._      // flatMap
   import cats.syntax.functor._      // map
   import cats.effect.syntax.spawn._ // start
-  
+
   def polymorphicEggBoiler[F[_]](using concurrent: Concurrent[F]): F[Unit] = {
 
     // The notifier is a consumer. The signal is a Deferred Unit because
@@ -121,14 +122,131 @@ object PolymorphicCoordination extends IOApp.Simple {
       } yield ()
 
     for {
-      ticksRef <- Ref[IO] of 0
-      signal <- Deferred[IO, Unit] // signal has type Deferred[IO, Int]
+      ticksRef    <- Ref[IO] of 0
+      signal      <- Deferred[IO, Unit] // signal has type Deferred[IO, Int]
       fibNotifier <- eggReadyNotification(signal).start
-      fibClock <- tickingClock(ticksRef, signal).start
-      _ <- fibClock.join
-      _ <- fibNotifier.join
+      fibClock    <- tickingClock(ticksRef, signal).start
+      _           <- fibClock.join
+      _           <- fibNotifier.join
     } yield ()
   }
+
+  //===========================================================================
+  // Exercises
+  /**
+   * Exercise 1. Generalize ourRacePair for any Effect type, not just IO.
+   */
+
+  type RaceResult[F[_], A, B] =
+    Either[(Outcome[F, Throwable, A], Fiber[F, Throwable, B]),  // (winner outcome, loser fiber)
+           (Fiber[F, Throwable, A], Outcome[F, Throwable, B])]  // (loser fiber, winner outcome)
+
+  // outcome of either fa or fb
+  type EitherOutcome[F[_], A, B] = Either[Outcome[F, Throwable, A], Outcome[F, Throwable, B]]
+
+  /**
+   * Add finalizer to complete signal regardless of result of completion of fiber
+   * The blocking call 'signal.get' should be cancelable because we would
+   * like to cancel the race pair from a different fiber if signal.get is
+   * taking forever. So mark the entire for comprehension as uncancelable
+   * but make signal.get uncancelable by wrapping it in poll.
+   *
+   * What if fa and fb are two effect chains in which some F's are cancelable
+   * and others are not?
+   */
+  import cats.effect.syntax.monadCancel._ // guaranteeCase extension method
+
+  def ourRacePair[F[_], A, B](fa: F[A], fb: F[B])(using concurrent: Concurrent[F]): F[RaceResult[F, A, B]] = {
+
+    // Helper method to cancel both fibers. Start separate fibers to cancel
+    // fibA and fibB because we want to cancel both of them at the same time.
+    def cancelFibers(fibA: Fiber[F, Throwable, A], fibB: Fiber[F, Throwable, B]): F[Unit] =
+      for { // Start separate fibers to cancel fibA and fibB because we want both of them to be canceled at the same time
+        cancelFibA <- fibA.cancel.start
+        cancelFibB <- fibB.cancel.start
+        _ <- cancelFibA.join // These joins can happen in the future; we don't care
+        _ <- cancelFibB.join
+      } yield ()
+
+    //-----------------------
+    concurrent.uncancelable { poll =>
+      for {
+        signal <- concurrent.deferred[EitherOutcome[F, A, B]]  // I wrote: Deferred[F, EitherOutcome[F, A, B]]
+        fibA <- (fa guaranteeCase (outcomeA => (signal complete Left(outcomeA)).void)).start
+        fibB <- (fb guaranteeCase (outcomeB => (signal complete Right(outcomeB)).void)).start
+        result <- poll(signal.get) onCancel cancelFibers(fibA, fibB) // blocking call waits for either fibA or fibB to complete. should be cancelable
+
+      } yield result match {
+        case Left(outcomeA) => Left(outcomeA, fibB) // A won
+        case Right(outcomeB) => Right(fibA, outcomeB) // B won
+      }
+    }
+  } // method ourRacePair
+
+  /**
+   * The above racePair implementation actually sits inside the Concurrent
+   * typeclass. Since the Spawn typeclass has the ability to create fibers,
+   * racePair is DEFINED in the Spawn typeclass.
+   *
+   * But since racePair is implemented in terms of ref and deferred, and those
+   * are defined in the Concurrent typeclass, the IMPLEMENTATION of racePair
+   * sits in the GenConcurrent typeclass.
+   */
+
+  //---------------------------------------------------------------------------
+  // Original code from the Defers lesson for the IO effect for Exercise 1.
+
+  type RaceResultIO[A, B] =
+    Either[(OutcomeIO[A], FiberIO[B]),
+      (FiberIO[A], OutcomeIO[B])]
+
+  // outcome of either io
+  type EitherOutcomeIO[A, B] = Either[OutcomeIO[A], OutcomeIO[B]]
+
+  /**
+   * Add finalizer to complete signal regardless of result of completion of fiber
+   * The blocking call 'signal.get' should be cancelable because we would
+   * like to cancel the race pair from a different fiber if signal.get is
+   * taking forever. So mark the entire for comprehension as uncancelable
+   * but make signal.get uncancelable by wrapping it in poll.
+   *
+   * What if ioa and iob are two effect chains in which some IOs are cancelable
+   * and others are not?
+   */
+  def ourRacePairIO[A, B](ioa: IO[A], iob: IO[B]): IO[RaceResultIO[A, B]] = {
+
+    // Helper method to cancel both fibers. Start separate fibers to cancel
+    // fibA and fibB because we want to cancel both of them at the same time.
+    def cancelFibers(fibA: FiberIO[A], fibB: FiberIO[B]): IO[Unit] =
+      for { // Start separate fibers to cancel fibA and fibB because we want both of them to be canceled at the same time
+        cancelFibA <- fibA.cancel.start
+        cancelFibB <- fibB.cancel.start
+        _ <- cancelFibA.join // These joins can happen in the future; we don't care
+        _ <- cancelFibB.join
+      } yield ()
+
+    //-----------------------
+    IO.uncancelable { poll =>
+      for {
+        signal <- Deferred[IO, EitherOutcomeIO[A, B]]
+        fibA <- (ioa guaranteeCase (outcomeA => (signal complete Left(outcomeA)).void)).start
+        fibB <- (iob guaranteeCase (outcomeB => (signal complete Right(outcomeB)).void)).start
+        result <- poll(signal.get) onCancel cancelFibers(fibA, fibB) // blocking call waits for either fibA or fibB to complete. should be cancelable
+
+      } yield result match {
+        case Left(outcomeA) => Left(outcomeA, fibB) // A won
+        case Right(outcomeB) => Right(fibA, outcomeB) // B won
+      }
+    }
+  }
+
+  //===========================================================================
+  /**
+   * Exercise 2. Generalize the Mutex concurrency primitive for any F.
+   * This is implemented in Mutex.scala as GenMutex.
+   */
+
+
 
   //---------------------------------------------------------------------------
   override def run: IO[Unit] = polymorphicEggBoiler[IO]
