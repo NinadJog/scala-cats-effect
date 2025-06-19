@@ -245,9 +245,7 @@ object PolymorphicCoordination extends IOApp.Simple {
    * Exercise 2. Generalize the Mutex concurrency primitive for any F.
    * This is implemented in Mutex.scala as GenMutex.
    */
-
-
-
+    
   //---------------------------------------------------------------------------
   override def run: IO[Unit] = polymorphicEggBoiler[IO]
 }
